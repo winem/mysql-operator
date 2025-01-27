@@ -29,6 +29,9 @@ type MySQLUserSpec struct {
 	// +kubebuilder:default=%
 	// +kubebuilder:validation:Optional
 
+	// MySQLDB (CRD) name to reference to, which decides the MySQL database the Grants are applied for
+	MysqlDbName string `json:"mysqlDBName"`
+
 	// MySQL hostname for MySQL account
 	Host string `json:"host"`
 }
