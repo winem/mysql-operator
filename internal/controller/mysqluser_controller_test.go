@@ -65,7 +65,7 @@ var _ = Describe("MySQLUser controller", func() {
 				// Delete MySQL
 				cleanUpMySQL(ctx, k8sClient, Namespace)
 			})
-			It("Should create Secret and update mysqluser's status", func() {
+			It("Should create Secret, grant permissions and update mysqluser's status", func() {
 				By("By creating a new MySQL")
 				mysql = &mysqlv1alpha1.MySQL{
 					TypeMeta:   metav1.TypeMeta{APIVersion: APIVersion, Kind: "MySQL"},
@@ -106,6 +106,17 @@ var _ = Describe("MySQLUser controller", func() {
 					}
 					return mysqlUser.Status.Reason
 				}).Should(Equal(mysqlUserReasonCompleted))
+
+
+                // Check if permissions are granted
+                Eventually(func() bool {
+                    var permissions string
+                    err := db.QueryRow(fmt.Sprintf("SHOW GRANTS FOR '%s'@'%s'", MySQLUserName, "nonexistinghost")).Scan(&permissions)
+                    if err != nil {
+                        return false
+                    }
+                    return strings.Contains(permissions, "ALL PRIVILEGES")
+                }).Should(BeTrue())
 			})
 
 			It("Should have finalizer", func() {

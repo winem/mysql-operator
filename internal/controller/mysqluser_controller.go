@@ -42,13 +42,14 @@ import (
 )
 
 const (
-	mysqlUserFinalizer                     = "mysqluser.nakamasato.com/finalizer"
-	mysqlUserReasonCompleted               = "Both secret and mysql user are successfully created."
-	mysqlUserReasonMySQLConnectionFailed   = "Failed to connect to mysql"
-	mysqlUserReasonMySQLFailedToCreateUser = "Failed to create MySQL user"
-	mysqlUserReasonMySQLFetchFailed        = "Failed to fetch MySQL"
-	mysqlUserPhaseReady                    = "Ready"
-	mysqlUserPhaseNotReady                 = "NotReady"
+	mysqlUserFinalizer                                          = "mysqluser.nakamasato.com/finalizer"
+	mysqlUserReasonCompleted                                    = "Both secret and mysql user are successfully created."
+	mysqlUserReasonMySQLConnectionFailed                        = "Failed to connect to mysql"
+	mysqlUserReasonMySQLFailedToCreateUser                      = "Failed to create MySQL user"
+	mysqlUserReasonMySQLFailedToGrantPermissionsToCreatedUser   = "Failed to grant permissions to the created MySQL user"
+	mysqlUserReasonMySQLFetchFailed                             = "Failed to fetch MySQL"
+	mysqlUserPhaseReady                                         = "Ready"
+	mysqlUserPhaseNotReady                                      = "NotReady"
 )
 
 // MySQLUserReconciler reconciles a MySQLUser object
@@ -216,10 +217,25 @@ func (r *MySQLUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: time.Second}, nil // requeue after 1 second
 	}
 
-	log.Info("[MySQL] Created or updated", "name", mysqlUserName, "mysqlUser.Namespace", mysqlUser.Namespace)
+    // Grant permissions to the MySQL user
+    _, err = mysqlClient.ExecContext(ctx,
+        fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%s'", mysqlUser.Spec.Database, mysqlUserName, mysqlUser.Spec.Host))
+    if err != nil {
+        log.Error(err, "[MySQL] Failed to grant permissions to MySQL user.", "mysqlName", mysqlName, "mysqlUserName", mysqlUserName)
+        mysqlUser.Status.Phase = mysqlUserPhaseNotReady
+        mysqlUser.Status.Reason = mysqlUserReasonMySQLFailedToGrantPermissionsToCreatedUser
+        mysqlUser.Status.MySQLUserCreated = false
+        if serr := r.Status().Update(ctx, mysqlUser); serr != nil {
+            log.Error(serr, "Failed to update mysqluser status", "mysqlUser", mysqlUser.Name)
+            return ctrl.Result{RequeueAfter: time.Second}, nil
+        }
+        return ctrl.Result{RequeueAfter: time.Second}, nil // requeue after 1 second
+    }
+
+	log.Info("[MySQL] User created or updated and permissions granted", "name", mysqlUserName, "mysqlUser.Namespace", mysqlUser.Namespace)
 	metrics.MysqlUserCreatedTotal.Increment() // TODO: increment only when a user is created
 	mysqlUser.Status.Phase = mysqlUserPhaseNotReady
-	mysqlUser.Status.Reason = "mysql user is successfully created. Secret is being created."
+	mysqlUser.Status.Reason = "MySQL user is successfully created and permissions granted. Secret is being created."
 	mysqlUser.Status.MySQLUserCreated = true
 
 	err = r.createSecret(ctx, password, secretName, mysqlUser.Namespace, mysqlUser)
