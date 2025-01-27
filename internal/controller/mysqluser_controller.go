@@ -42,13 +42,14 @@ import (
 )
 
 const (
-	mysqlUserFinalizer                     = "mysqluser.nakamasato.com/finalizer"
-	mysqlUserReasonCompleted               = "Both secret and mysql user are successfully created."
-	mysqlUserReasonMySQLConnectionFailed   = "Failed to connect to mysql"
-	mysqlUserReasonMySQLFailedToCreateUser = "Failed to create MySQL user"
-	mysqlUserReasonMySQLFetchFailed        = "Failed to fetch MySQL"
-	mysqlUserPhaseReady                    = "Ready"
-	mysqlUserPhaseNotReady                 = "NotReady"
+	mysqlUserFinalizer                                        = "mysqluser.nakamasato.com/finalizer"
+	mysqlUserReasonCompleted                                  = "Both secret and mysql user are successfully created."
+	mysqlUserReasonMySQLConnectionFailed                      = "Failed to connect to mysql"
+	mysqlUserReasonMySQLFailedToCreateUser                    = "Failed to create MySQL user"
+	mysqlUserReasonMySQLFailedToGrantPermissionsToCreatedUser = "Failed to grant permissions to created MySQL user"
+	mysqlUserReasonMySQLFetchFailed                           = "Failed to fetch MySQL"
+	mysqlUserPhaseReady                                       = "Ready"
+	mysqlUserPhaseNotReady                                    = "NotReady"
 )
 
 // MySQLUserReconciler reconciles a MySQLUser object
@@ -84,6 +85,8 @@ func (r *MySQLUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	log.Info("[FetchMySQLUser] Found.", "name", mysqlUser.ObjectMeta.Name, "mysqlUser.Namespace", mysqlUser.Namespace)
 	mysqlUserName := mysqlUser.ObjectMeta.Name
+	mysqlDbName := mysqlUser.Spec.MysqlDbName
+	host := mysqlUser.Spec.Host
 	mysqlName := mysqlUser.Spec.MysqlName
 
 	// Fetch MySQL
@@ -203,7 +206,7 @@ func (r *MySQLUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Create MySQL user if not exists with the password set above.
 	_, err = mysqlClient.ExecContext(ctx,
-		fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s'", mysqlUserName, mysqlUser.Spec.Host, password))
+		fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s'", mysqlUserName, host, password))
 	if err != nil {
 		log.Error(err, "[MySQL] Failed to create MySQL user.", "mysqlName", mysqlName, "mysqlUserName", mysqlUserName)
 		mysqlUser.Status.Phase = mysqlUserPhaseNotReady
@@ -215,6 +218,38 @@ func (r *MySQLUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil // requeue after 1 second
 	}
+
+    // Fetch the MySQLDB resource if mysqlDbName is provided
+    var dbName string
+    if mysqlDbName != "" {
+        mysqlDB := &mysqlv1alpha1.MySQLDB{}
+        err = r.Get(ctx, client.ObjectKey{Namespace: mysqlUser.Namespace, Name: mysqlDbName}, mysqlDB)
+        if err != nil {
+            log.Error(err, "Failed to get MySQLDB", "mysqlDbName", mysqlDbName)
+            return ctrl.Result{}, err
+        }
+
+        // Retrieve the DBName from the MySQLDB spec
+        dbName = mysqlDB.Spec.DBName
+    } else {
+        // Use `*` as fallback if mysqlDbName is not provided
+        dbName = "*"
+    }
+
+    // Grant permissions to the MySQL user
+    _, err = mysqlClient.ExecContext(ctx,
+        fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%s'", dbName, mysqlUserName, host))
+    if err != nil {
+        log.Error(err, "[MySQL] Failed to grant permissions to MySQL user.", "mysqlName", mysqlName, "mysqlUserName", mysqlUserName)
+        mysqlUser.Status.Phase = mysqlUserPhaseNotReady
+        mysqlUser.Status.Reason = mysqlUserReasonMySQLFailedToGrantPermissionsToCreatedUser
+        mysqlUser.Status.MySQLUserCreated = false
+        if serr := r.Status().Update(ctx, mysqlUser); serr != nil {
+            log.Error(serr, "Failed to update mysqluser status", "mysqlUser", mysqlUser.Name)
+            return ctrl.Result{RequeueAfter: time.Second}, nil
+        }
+        return ctrl.Result{RequeueAfter: time.Second}, nil // requeue after 1 second
+    }
 
 	log.Info("[MySQL] Created or updated", "name", mysqlUserName, "mysqlUser.Namespace", mysqlUser.Namespace)
 	metrics.MysqlUserCreatedTotal.Increment() // TODO: increment only when a user is created
